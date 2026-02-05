@@ -30,7 +30,7 @@ def preprocess_data():
     # Fill NaNs in 'TotalCharges' with median
     median_total_charges = df['TotalCharges'].median()
     print(f"Filling NaNs in 'TotalCharges' with median: {median_total_charges:.2f}")
-    df['TotalCharges'].fillna(median_total_charges, inplace=True)
+    ddf['TotalCharges'] = df['TotalCharges'].fillna(median_total_charges)
     
     # Drop 'customerID'
     print("Dropping 'customerID' column...")
