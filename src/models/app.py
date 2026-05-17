@@ -5,7 +5,6 @@ Sidebar: input features (Demographics, Services, Account Info) + Predict button.
 Main: Tabs for Prediction Results, Model Performance, Data Insights.
 """
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -262,7 +261,18 @@ def main():
         "You can also explore model performance and data insights in the tabs below."
     )
 
-    X_train, X_test, y_train, y_test, df_raw = load_processed_data()
+    try:
+        X_train, X_test, y_train, y_test, df_raw = load_processed_data()
+    except FileNotFoundError as e:
+        st.error(
+            "Processed or raw data files not found. Run preprocessing first (e.g. `python src/preprocess.py`) "
+            f"and ensure `data/raw/telco_churn.csv` exists. Details: {e}"
+        )
+        return
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
+        return
+
     y_pred = model.predict(X_test)
     y_proba = model.predict_proba(X_test)[:, 1]
     accuracy = accuracy_score(y_test, y_pred)
@@ -347,7 +357,7 @@ def main():
         disp.plot(ax=ax, cmap="Blues")
         ax.set_title("Confusion Matrix (Test Set)")
         st.pyplot(fig_cm)
-        plt.close()
+        plt.close(fig_cm)
 
         # ROC curve
         fpr, tpr, _ = roc_curve(y_test, y_proba)
