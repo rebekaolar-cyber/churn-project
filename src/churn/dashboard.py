@@ -75,87 +75,216 @@ def top_factors(
     return [(feature_names[i], float(importances[i])) for i in idx]
 
 
-def get_sidebar_inputs(feature_names: list[str]) -> dict[str, Any]:
-    """Collect sidebar inputs and return a feature_name -> value mapping.
+# Plain-language tooltips shown on each sidebar field.
+HELP: dict[str, str] = {
+    "gender": "The customer's gender.",
+    "SeniorCitizen": "Is the customer 65 or older?",
+    "Partner": "Does the customer have a spouse or partner?",
+    "Dependents": "Does the customer support dependents (children/family)?",
+    "PhoneService": "Does the customer have a phone line with us?",
+    "MultipleLines": "Does the customer have more than one phone line?",
+    "InternetService": "Type of internet the customer has, or none.",
+    "OnlineSecurity": "Optional add-on: online security software.",
+    "OnlineBackup": "Optional add-on: cloud backup.",
+    "DeviceProtection": "Optional add-on: device protection plan.",
+    "TechSupport": "Optional add-on: premium tech support.",
+    "StreamingTV": "Does the customer stream TV through us?",
+    "StreamingMovies": "Does the customer stream movies through us?",
+    "tenure": "Months the customer has been with us. Short tenure is one of "
+    "the strongest churn signals.",
+    "MonthlyCharges": "What the customer pays per month, in dollars.",
+    "TotalCharges": "What the customer has paid in total, in dollars.",
+    "Contract": "Contract length. Month-to-month customers churn far more than "
+    "those on 1- or 2-year contracts.",
+    "PaperlessBilling": "Is the customer on paperless billing?",
+    "PaymentMethod": "How the customer pays their bill.",
+}
 
-    Inputs are grouped: Demographics, Services, Account Info.
+# Default 'average' customer used to seed the sidebar on first load.
+DEFAULTS: dict[str, Any] = {
+    "gender": "Female", "SeniorCitizen": 0, "Partner": "No", "Dependents": "No",
+    "PhoneService": "Yes", "MultipleLines": "No", "InternetService": "DSL",
+    "OnlineSecurity": "No", "OnlineBackup": "No", "DeviceProtection": "No",
+    "TechSupport": "No", "StreamingTV": "No", "StreamingMovies": "No",
+    "tenure": 12, "MonthlyCharges": 50.0, "TotalCharges": 500.0,
+    "Contract": "Month-to-month", "PaperlessBilling": "No",
+    "PaymentMethod": "Mailed check",
+}
+
+# One-click example profiles so users can see the model work instantly.
+PRESETS: dict[str, dict[str, Any]] = {
+    "⚠️ High-risk customer": {
+        "gender": "Female", "SeniorCitizen": 1, "Partner": "No", "Dependents": "No",
+        "PhoneService": "Yes", "MultipleLines": "No", "InternetService": "Fiber optic",
+        "OnlineSecurity": "No", "OnlineBackup": "No", "DeviceProtection": "No",
+        "TechSupport": "No", "StreamingTV": "Yes", "StreamingMovies": "Yes",
+        "tenure": 2, "MonthlyCharges": 95.0, "TotalCharges": 190.0,
+        "Contract": "Month-to-month", "PaperlessBilling": "Yes",
+        "PaymentMethod": "Electronic check",
+    },
+    "✅ Loyal customer": {
+        "gender": "Male", "SeniorCitizen": 0, "Partner": "Yes", "Dependents": "Yes",
+        "PhoneService": "Yes", "MultipleLines": "Yes", "InternetService": "DSL",
+        "OnlineSecurity": "Yes", "OnlineBackup": "Yes", "DeviceProtection": "Yes",
+        "TechSupport": "Yes", "StreamingTV": "No", "StreamingMovies": "No",
+        "tenure": 65, "MonthlyCharges": 60.0, "TotalCharges": 3900.0,
+        "Contract": "Two year", "PaperlessBilling": "No",
+        "PaymentMethod": "Bank transfer (automatic)",
+    },
+}
+
+# Internet add-on fields, each encoded as {field}_No internet service / {field}_Yes.
+ADDON_FIELDS: list[str] = [
+    "OnlineSecurity", "OnlineBackup", "DeviceProtection",
+    "TechSupport", "StreamingTV", "StreamingMovies",
+]
+
+
+def encode_inputs(sel: dict[str, Any], feature_names: list[str]) -> dict[str, Any]:
+    """Convert human-readable customer selections into the model's one-hot
+    feature vector. Pure function (no Streamlit) so it can be unit-tested.
     """
     inputs: dict[str, Any] = {col: 0 for col in feature_names}
 
+    inputs["gender_Male"] = 1 if sel["gender"] == "Male" else 0
+    inputs["SeniorCitizen"] = sel["SeniorCitizen"]
+    inputs["Partner_Yes"] = 1 if sel["Partner"] == "Yes" else 0
+    inputs["Dependents_Yes"] = 1 if sel["Dependents"] == "Yes" else 0
+
+    inputs["PhoneService_Yes"] = 1 if sel["PhoneService"] == "Yes" else 0
+    inputs["MultipleLines_No phone service"] = (
+        1 if sel["MultipleLines"] == "No phone service" else 0
+    )
+    inputs["MultipleLines_Yes"] = 1 if sel["MultipleLines"] == "Yes" else 0
+
+    inputs["InternetService_Fiber optic"] = (
+        1 if sel["InternetService"] == "Fiber optic" else 0
+    )
+    inputs["InternetService_No"] = 1 if sel["InternetService"] == "No" else 0
+
+    for field in ADDON_FIELDS:
+        inputs[f"{field}_No internet service"] = (
+            1 if sel[field] == "No internet service" else 0
+        )
+        inputs[f"{field}_Yes"] = 1 if sel[field] == "Yes" else 0
+
+    inputs["tenure"] = sel["tenure"]
+    inputs["MonthlyCharges"] = sel["MonthlyCharges"]
+    inputs["TotalCharges"] = sel["TotalCharges"]
+
+    inputs["Contract_One year"] = 1 if sel["Contract"] == "One year" else 0
+    inputs["Contract_Two year"] = 1 if sel["Contract"] == "Two year" else 0
+    inputs["PaperlessBilling_Yes"] = 1 if sel["PaperlessBilling"] == "Yes" else 0
+
+    pay = sel["PaymentMethod"]
+    inputs["PaymentMethod_Credit card (automatic)"] = (
+        1 if pay == "Credit card (automatic)" else 0
+    )
+    inputs["PaymentMethod_Electronic check"] = 1 if pay == "Electronic check" else 0
+    inputs["PaymentMethod_Mailed check"] = 1 if pay == "Mailed check" else 0
+
+    return inputs
+
+
+def _apply_preset(name: str) -> None:
+    """Button callback: load a preset profile into the sidebar widgets."""
+    for key, value in PRESETS[name].items():
+        st.session_state[key] = value
+    st.session_state["show_prediction"] = True
+
+
+def get_sidebar_inputs(feature_names: list[str]) -> dict[str, Any]:
+    """Render the sidebar and return the encoded feature vector.
+
+    Multiple Lines and internet add-ons are auto-resolved and disabled when
+    they don't apply (no phone / no internet), so inputs stay self-consistent.
+    """
+    # Seed defaults once; widgets and presets then share this session state.
+    for key, value in DEFAULTS.items():
+        st.session_state.setdefault(key, value)
+
+    # ---- Example presets ----
+    st.sidebar.caption("New here? Load an example, then click Predict.")
+    for name in PRESETS:
+        st.sidebar.button(
+            name, on_click=_apply_preset, args=(name,), use_container_width=True
+        )
+
+    sel: dict[str, Any] = {}
+
     # ---- Demographics ----
     st.sidebar.subheader("Demographics")
-    gender = st.sidebar.selectbox("Gender", ["Female", "Male"])
-    inputs["gender_Male"] = 1 if gender == "Male" else 0
-    inputs["SeniorCitizen"] = st.sidebar.selectbox(
-        "Senior Citizen", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes"
+    sel["gender"] = st.sidebar.selectbox(
+        "Gender", ["Female", "Male"], key="gender", help=HELP["gender"]
     )
-    partner = st.sidebar.selectbox("Partner", ["No", "Yes"])
-    inputs["Partner_Yes"] = 1 if partner == "Yes" else 0
-    dependents = st.sidebar.selectbox("Dependents", ["No", "Yes"])
-    inputs["Dependents_Yes"] = 1 if dependents == "Yes" else 0
+    sel["SeniorCitizen"] = st.sidebar.selectbox(
+        "Senior Citizen", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes",
+        key="SeniorCitizen", help=HELP["SeniorCitizen"],
+    )
+    sel["Partner"] = st.sidebar.selectbox(
+        "Partner", ["No", "Yes"], key="Partner", help=HELP["Partner"]
+    )
+    sel["Dependents"] = st.sidebar.selectbox(
+        "Dependents", ["No", "Yes"], key="Dependents", help=HELP["Dependents"]
+    )
 
     # ---- Services ----
     st.sidebar.subheader("Services")
-    phone = st.sidebar.selectbox("Phone Service", ["No", "Yes"])
-    inputs["PhoneService_Yes"] = 1 if phone == "Yes" else 0
-
-    mult_lines = st.sidebar.selectbox(
-        "Multiple Lines", ["No phone service", "No", "Yes"]
+    sel["PhoneService"] = st.sidebar.selectbox(
+        "Phone Service", ["No", "Yes"], key="PhoneService", help=HELP["PhoneService"]
     )
-    inputs["MultipleLines_No phone service"] = 1 if mult_lines == "No phone service" else 0
-    inputs["MultipleLines_Yes"] = 1 if mult_lines == "Yes" else 0
+    has_phone = sel["PhoneService"] == "Yes"
+    ml_choice = st.sidebar.selectbox(
+        "Multiple Lines", ["No", "Yes"], key="MultipleLines",
+        disabled=not has_phone, help=HELP["MultipleLines"],
+    )
+    sel["MultipleLines"] = ml_choice if has_phone else "No phone service"
+    if not has_phone:
+        st.sidebar.caption("↳ No phone service — multiple lines not applicable.")
 
-    internet = st.sidebar.selectbox("Internet Service", ["DSL", "Fiber optic", "No"])
-    inputs["InternetService_Fiber optic"] = 1 if internet == "Fiber optic" else 0
-    inputs["InternetService_No"] = 1 if internet == "No" else 0
-
-    opt_vals = ["No internet service", "No", "Yes"]
-    security = st.sidebar.selectbox("Online Security", opt_vals)
-    inputs["OnlineSecurity_No internet service"] = 1 if security == "No internet service" else 0
-    inputs["OnlineSecurity_Yes"] = 1 if security == "Yes" else 0
-
-    backup = st.sidebar.selectbox("Online Backup", opt_vals)
-    inputs["OnlineBackup_No internet service"] = 1 if backup == "No internet service" else 0
-    inputs["OnlineBackup_Yes"] = 1 if backup == "Yes" else 0
-
-    device = st.sidebar.selectbox("Device Protection", opt_vals)
-    inputs["DeviceProtection_No internet service"] = 1 if device == "No internet service" else 0
-    inputs["DeviceProtection_Yes"] = 1 if device == "Yes" else 0
-
-    tech = st.sidebar.selectbox("Tech Support", opt_vals)
-    inputs["TechSupport_No internet service"] = 1 if tech == "No internet service" else 0
-    inputs["TechSupport_Yes"] = 1 if tech == "Yes" else 0
-
-    stream_tv = st.sidebar.selectbox("Streaming TV", opt_vals)
-    inputs["StreamingTV_No internet service"] = 1 if stream_tv == "No internet service" else 0
-    inputs["StreamingTV_Yes"] = 1 if stream_tv == "Yes" else 0
-
-    stream_mov = st.sidebar.selectbox("Streaming Movies", opt_vals)
-    inputs["StreamingMovies_No internet service"] = 1 if stream_mov == "No internet service" else 0
-    inputs["StreamingMovies_Yes"] = 1 if stream_mov == "Yes" else 0
+    sel["InternetService"] = st.sidebar.selectbox(
+        "Internet Service", ["DSL", "Fiber optic", "No"],
+        key="InternetService", help=HELP["InternetService"],
+    )
+    has_net = sel["InternetService"] != "No"
+    for field, label in [
+        ("OnlineSecurity", "Online Security"),
+        ("OnlineBackup", "Online Backup"),
+        ("DeviceProtection", "Device Protection"),
+        ("TechSupport", "Tech Support"),
+        ("StreamingTV", "Streaming TV"),
+        ("StreamingMovies", "Streaming Movies"),
+    ]:
+        choice = st.sidebar.selectbox(
+            label, ["No", "Yes"], key=field, disabled=not has_net, help=HELP[field]
+        )
+        sel[field] = choice if has_net else "No internet service"
+    if not has_net:
+        st.sidebar.caption("↳ No internet service — add-ons above not applicable.")
 
     # ---- Account Info ----
     st.sidebar.subheader("Account Info")
-    inputs["tenure"] = st.sidebar.number_input(
-        "Tenure (months)", min_value=0, max_value=72, value=12, step=1
+    sel["tenure"] = st.sidebar.number_input(
+        "Tenure (months)", min_value=0, max_value=72, step=1,
+        key="tenure", help=HELP["tenure"],
     )
-    inputs["MonthlyCharges"] = st.sidebar.number_input(
-        "Monthly Charges ($)", min_value=0.0, max_value=120.0, value=50.0, step=1.0
+    sel["MonthlyCharges"] = st.sidebar.number_input(
+        "Monthly Charges ($)", min_value=0.0, max_value=120.0, step=1.0,
+        key="MonthlyCharges", help=HELP["MonthlyCharges"],
     )
-    inputs["TotalCharges"] = st.sidebar.number_input(
-        "Total Charges ($)", min_value=0.0, max_value=10000.0, value=500.0, step=10.0
+    sel["TotalCharges"] = st.sidebar.number_input(
+        "Total Charges ($)", min_value=0.0, max_value=10000.0, step=10.0,
+        key="TotalCharges", help=HELP["TotalCharges"],
     )
-
-    contract = st.sidebar.selectbox(
-        "Contract", ["Month-to-month", "One year", "Two year"]
+    sel["Contract"] = st.sidebar.selectbox(
+        "Contract", ["Month-to-month", "One year", "Two year"],
+        key="Contract", help=HELP["Contract"],
     )
-    inputs["Contract_One year"] = 1 if contract == "One year" else 0
-    inputs["Contract_Two year"] = 1 if contract == "Two year" else 0
-
-    paperless = st.sidebar.selectbox("Paperless Billing", ["No", "Yes"])
-    inputs["PaperlessBilling_Yes"] = 1 if paperless == "Yes" else 0
-
-    payment = st.sidebar.selectbox(
+    sel["PaperlessBilling"] = st.sidebar.selectbox(
+        "Paperless Billing", ["No", "Yes"],
+        key="PaperlessBilling", help=HELP["PaperlessBilling"],
+    )
+    sel["PaymentMethod"] = st.sidebar.selectbox(
         "Payment Method",
         [
             "Bank transfer (automatic)",
@@ -163,13 +292,10 @@ def get_sidebar_inputs(feature_names: list[str]) -> dict[str, Any]:
             "Electronic check",
             "Mailed check",
         ],
+        key="PaymentMethod", help=HELP["PaymentMethod"],
     )
-    cc_auto = "Credit card (automatic)"
-    inputs[f"PaymentMethod_{cc_auto}"] = 1 if payment == cc_auto else 0
-    inputs["PaymentMethod_Electronic check"] = 1 if payment == "Electronic check" else 0
-    inputs["PaymentMethod_Mailed check"] = 1 if payment == "Mailed check" else 0
 
-    return inputs
+    return encode_inputs(sel, feature_names)
 
 
 def inject_custom_css() -> None:
@@ -256,7 +382,10 @@ def main() -> None:
     # ---- SIDEBAR: input features + predict ----
     st.sidebar.header("Input Features")
     inputs = get_sidebar_inputs(feature_names)
-    predict_clicked = st.sidebar.button("Predict", type="primary")
+    if st.sidebar.button("Predict", type="primary", use_container_width=True):
+        st.session_state["show_prediction"] = True
+    # Set by the Predict button and by preset buttons (via _apply_preset).
+    show_prediction = st.session_state.get("show_prediction", False)
 
     # ---- MAIN: tabs ----
     tab1, tab2, tab3 = st.tabs(
@@ -265,10 +394,23 @@ def main() -> None:
 
     with tab1:
         st.subheader("Prediction Results")
-        if predict_clicked:
+        if show_prediction:
             row_df = build_input_row(feature_names, inputs)
             proba = float(model.predict_proba(row_df)[0, 1])
             proba_pct = round(proba * 100, 1)
+            risk, risk_color = risk_level(proba)
+
+            # ---- Plain-English verdict (the headline result) ----
+            verdict = (
+                f"This customer has a **{proba_pct:.1f}% chance of churning** "
+                f"— **{risk.lower()} risk**."
+            )
+            if risk == "High":
+                st.error(f"🔴 {verdict}  Consider a retention offer.")
+            elif risk == "Medium":
+                st.warning(f"🟠 {verdict}  Worth keeping an eye on.")
+            else:
+                st.success(f"🟢 {verdict}  This customer looks likely to stay.")
 
             fig_gauge = go.Figure(
                 go.Indicator(
@@ -294,18 +436,15 @@ def main() -> None:
             fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
             st.plotly_chart(fig_gauge, use_container_width=True)
 
-            risk, risk_color = risk_level(proba)
-            st.markdown(f"**Risk level:** :{risk_color}[**{risk}**]")
-
-            st.markdown("**Top 3 factors influencing this prediction:**")
+            st.markdown("**Top 3 factors the model weighs most overall:**")
             for i, (name, importance) in enumerate(
                 top_factors(model.feature_importances_, feature_names), 1
             ):
                 st.write(f"{i}. {name} (importance: {importance:.3f})")
         else:
             st.info(
-                "Click **Predict** in the sidebar to see the churn probability "
-                "and risk level."
+                "Set the customer's details in the sidebar (or load an example) "
+                "and click **Predict** to see their churn probability and risk level."
             )
 
     with tab2:
