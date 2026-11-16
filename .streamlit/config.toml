@@ -1,8 +1,31 @@
-[theme]
-primaryColor = "#3b82f6"
-backgroundColor = "#f8fafc"
-secondaryBackgroundColor = "#e2e8f0"
-textColor = "#1e293b"
+# The dashboard's look. Colours here match the ones in src/churn/ui.py; change both together.
+
+[client]
+# No developer menu for visitors. Buttons that Streamlit Community Cloud adds still show.
+toolbarMode = "minimal"
 
 [server]
 headless = true
+# Serves static/ at app/static/: the font file, so no font is fetched from another site.
+enableStaticServing = true
+
+[theme]
+base = "light"
+primaryColor = "#2447F0"
+backgroundColor = "#F3F4F6"
+secondaryBackgroundColor = "#E4E6EB"
+textColor = "#101218"
+linkColor = "#2447F0"
+borderColor = "#C4C8D0"
+font = "Archivo, system-ui, sans-serif"
+headingFont = "Archivo, system-ui, sans-serif"
+headingFontSizes = ["2.4rem", "1.9rem", "1.45rem"]
+headingFontWeights = [900, 800, 800]
+baseRadius = "0.2rem"
+buttonRadius = "0.2rem"
+
+[[theme.fontFaces]]
+family = "Archivo"
+url = "app/static/fonts/Archivo-latin.woff2"
+weight = "100 900"
+style = "normal"
