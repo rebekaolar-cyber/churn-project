@@ -1,12 +1,14 @@
 # Customer Churn Prediction 📉
 
 [![CI](https://github.com/rebekaolar-cyber/churn-project/actions/workflows/ci.yml/badge.svg)](https://github.com/rebekaolar-cyber/churn-project/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Coverage](https://img.shields.io/badge/coverage-98%25-brightgreen)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
 
 End-to-end ML pipeline that predicts telecom customer churn from behavioral and
 account data, served through an interactive Streamlit dashboard — so retention
 efforts can target at-risk customers *before* they leave.
+
+![The dashboard: a customer's account on the left, the model's estimate on the right](docs/dashboard.png)
 
 ## Problem
 
@@ -22,10 +24,26 @@ Random Forest with SMOTE-balanced training, evaluated on a held-out 20% test set
 | --- | --- |
 | Accuracy | 78% |
 | ROC-AUC | 0.82 |
-| Churn recall | 0.61 |
+| Churn recall | 0.62 |
 | Churn precision | 0.58 |
 
-Top predictors: contract type, tenure, monthly charges, and payment method.
+Top predictors: total charges, monthly charges, tenure and contract type.
+
+## The dashboard
+
+- **One customer.** Describe an account (contract, billing, services) and the model's estimate
+  updates as you go: the chance the customer leaves, where that sits among the 1,409 test
+  customers, and which single change would lower it most. Those "what if" figures are the
+  model's own estimates for the changed account; they show what it has learned, not what an
+  offer would do.
+- **How good is the model?** Its four outcomes on customers it never saw, in plain words
+  (caught, missed, flagged by mistake, left alone), the ROC curve, and the inputs it weighs most.
+- **What the data says.** How many customers left, and how leaving relates to contract length,
+  tenure and price.
+
+![The model's four outcomes on the test customers](docs/model.png)
+
+Colour means one thing throughout: red is leaving, blue is staying, amber is in between.
 
 ## Project structure
 
@@ -36,8 +54,11 @@ churn-project/
 │   ├── data_prep.py      # Load → clean → encode → split → save
 │   ├── train.py          # SMOTE + Random Forest (optional grid search)
 │   ├── bootstrap.py      # Builds artifacts on first deploy
-│   └── dashboard.py      # Streamlit app
-├── tests/                # pytest suite (98% coverage)
+│   ├── profile.py        # A described customer → the model's columns; what-if options
+│   ├── ui.py             # The dashboard's look: colours, styles, HTML blocks, chart style
+│   └── dashboard.py      # Streamlit app (wires the two above to the page)
+├── static/               # The dashboard's font and icon, served by the app itself
+├── tests/                # pytest suite (99% coverage)
 ├── notebooks/            # 01_eda, 02_preprocessing (exploration)
 ├── data/
 │   ├── raw/              # telco_churn.csv
@@ -88,7 +109,7 @@ ruff check .    # lint
 mypy            # static type check
 ```
 
-CI runs all three on Python 3.10–3.12 for every push and pull request
+CI runs all three on Python 3.11–3.13 for every push and pull request
 (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## Deployment (Streamlit Community Cloud)
@@ -108,3 +129,5 @@ container's lifetime.
 ## Author
 
 Rebeka Natalia Olar · [github.com/rebekaolar-cyber](https://github.com/rebekaolar-cyber)
+
+Font: Archivo, under the SIL Open Font License 1.1 (licence text in `static/fonts/`).

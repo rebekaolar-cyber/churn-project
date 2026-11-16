@@ -1,8 +1,12 @@
-"""Customer Churn Prediction Dashboard - Streamlit app.
+"""Customer churn dashboard (Streamlit).
 
-Header: title, description, key metrics.
-Sidebar: input features (Demographics, Services, Account Info) + Predict button.
-Main: tabs for Prediction Results, Model Performance, Data Insights.
+Masthead: the question and three facts about the data.
+Tab 1, one customer: describe an account, see the model's estimate and what would lower it.
+Tab 2, the model: its four outcomes on unseen customers, the ROC curve, what it weighs.
+Tab 3, the data: how many left, and how leaving relates to contract, tenure and price.
+
+The look lives in ``churn.ui``; the translation from a described customer to the model's
+columns lives in ``churn.profile``. This module only wires them to the page.
 """
 
 from __future__ import annotations
@@ -10,21 +14,26 @@ from __future__ import annotations
 from typing import Any, cast
 
 import joblib
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from sklearn.metrics import (
-    ConfusionMatrixDisplay,
-    accuracy_score,
-    auc,
-    confusion_matrix,
-    roc_curve,
+from sklearn.metrics import accuracy_score, auc, confusion_matrix, roc_curve
+
+from churn import config, ui
+from churn.profile import (
+    ADD_ONS,
+    CONTRACTS,
+    INTERNET,
+    PAYMENTS,
+    Profile,
+    alternatives,
+    encode,
+    pretty_feature,
 )
 
-from churn import config
+REPO = "https://github.com/rebekaolar-cyber/churn-project"
+HIDE_TOOLBAR = {"displayModeBar": False}
 
 
 @st.cache_resource
@@ -38,9 +47,7 @@ def load_model_and_artifacts() -> tuple[Any | None, list[str] | None]:
 
 
 @st.cache_data
-def load_processed_data() -> (
-    tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]
-):
+def load_processed_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:
     """Load processed train/test splits and raw data for metrics and EDA."""
     X_train = pd.read_csv(config.X_TRAIN_FILE)
     X_test = pd.read_csv(config.X_TEST_FILE)
@@ -50,9 +57,7 @@ def load_processed_data() -> (
     return X_train, X_test, y_train, y_test, df_raw
 
 
-def build_input_row(
-    feature_names: list[str], inputs: dict[str, Any]
-) -> pd.DataFrame:
+def build_input_row(feature_names: list[str], inputs: dict[str, Any]) -> pd.DataFrame:
     """Build a single-row DataFrame with columns in the exact feature order."""
     row = {col: inputs.get(col, 0) for col in feature_names}
     return pd.DataFrame([row])[feature_names]
@@ -75,147 +80,112 @@ def top_factors(
     return [(feature_names[i], float(importances[i])) for i in idx]
 
 
-def get_sidebar_inputs(feature_names: list[str]) -> dict[str, Any]:
-    """Collect sidebar inputs and return a feature_name -> value mapping.
+@st.cache_data
+def score_test_set() -> tuple[np.ndarray, np.ndarray]:
+    """The model's answer and its probability for every test customer, computed once."""
+    model, _ = load_model_and_artifacts()
+    _, X_test, _, _, _ = load_processed_data()
+    assert model is not None, "score_test_set() is only called once the model has loaded"
+    return model.predict(X_test), model.predict_proba(X_test)[:, 1]
 
-    Inputs are grouped: Demographics, Services, Account Info.
+
+def score(model: Any, feature_names: list[str], profile: Profile) -> float:
+    """The model's churn probability for one described customer."""
+    row = build_input_row(feature_names, encode(profile))
+    return float(model.predict_proba(row)[0, 1])
+
+
+def lowering_changes(
+    model: Any, feature_names: list[str], profile: Profile, proba: float, n: int = 3
+) -> list[tuple[str, float]]:
+    """The n single changes that lower the estimate most, as (description, new probability).
+
+    Changes that move the estimate by less than one point are left out.
     """
-    inputs: dict[str, Any] = {col: 0 for col in feature_names}
+    scored = [
+        (label, score(model, feature_names, changed)) for label, changed in alternatives(profile)
+    ]
+    lower = [(label, new) for label, new in scored if proba - new >= 0.01]
+    return sorted(lower, key=lambda item: item[1])[:n]
 
-    # ---- Demographics ----
-    st.sidebar.subheader("Demographics")
-    gender = st.sidebar.selectbox("Gender", ["Female", "Male"])
-    inputs["gender_Male"] = 1 if gender == "Male" else 0
-    inputs["SeniorCitizen"] = st.sidebar.selectbox(
-        "Senior Citizen", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes"
+
+def pick(label: str, options: tuple[str, ...], default: str, key: str) -> str:
+    """A segmented control that always has a value.
+
+    Clicking the selected option again would clear it; the callback puts it back.
+    """
+    last = f"{key}_last"
+
+    def keep_one() -> None:
+        if st.session_state[key] is None:
+            st.session_state[key] = st.session_state.get(last, default)
+
+    value = st.segmented_control(label, options, default=default, key=key, on_change=keep_one)
+    value = default if value is None else value
+    st.session_state[last] = value
+    return str(value)
+
+
+def customer_form() -> Profile:
+    """The account sheet: every input the model uses, in three groups."""
+    st.html(ui.group("Contract and billing", first=True))
+    contract = pick("Contract", CONTRACTS, "Month-to-month", "contract")
+    a, b = st.columns(2)
+    tenure = a.slider("Months with the company", 0, 72, 12)
+    monthly = b.slider("Monthly charges", 18, 120, 70, format="$%d")
+    a, b = st.columns(2)
+    total = a.number_input(
+        "Total charges so far ($)", min_value=0.0, max_value=10000.0, value=840.0, step=10.0
     )
-    partner = st.sidebar.selectbox("Partner", ["No", "Yes"])
-    inputs["Partner_Yes"] = 1 if partner == "Yes" else 0
-    dependents = st.sidebar.selectbox("Dependents", ["No", "Yes"])
-    inputs["Dependents_Yes"] = 1 if dependents == "Yes" else 0
+    payment = b.selectbox("Payment method", PAYMENTS, index=2)
+    paperless = st.toggle("Paperless billing", value=True)
 
-    # ---- Services ----
-    st.sidebar.subheader("Services")
-    phone = st.sidebar.selectbox("Phone Service", ["No", "Yes"])
-    inputs["PhoneService_Yes"] = 1 if phone == "Yes" else 0
-
-    mult_lines = st.sidebar.selectbox(
-        "Multiple Lines", ["No phone service", "No", "Yes"]
-    )
-    inputs["MultipleLines_No phone service"] = 1 if mult_lines == "No phone service" else 0
-    inputs["MultipleLines_Yes"] = 1 if mult_lines == "Yes" else 0
-
-    internet = st.sidebar.selectbox("Internet Service", ["DSL", "Fiber optic", "No"])
-    inputs["InternetService_Fiber optic"] = 1 if internet == "Fiber optic" else 0
-    inputs["InternetService_No"] = 1 if internet == "No" else 0
-
-    opt_vals = ["No internet service", "No", "Yes"]
-    security = st.sidebar.selectbox("Online Security", opt_vals)
-    inputs["OnlineSecurity_No internet service"] = 1 if security == "No internet service" else 0
-    inputs["OnlineSecurity_Yes"] = 1 if security == "Yes" else 0
-
-    backup = st.sidebar.selectbox("Online Backup", opt_vals)
-    inputs["OnlineBackup_No internet service"] = 1 if backup == "No internet service" else 0
-    inputs["OnlineBackup_Yes"] = 1 if backup == "Yes" else 0
-
-    device = st.sidebar.selectbox("Device Protection", opt_vals)
-    inputs["DeviceProtection_No internet service"] = 1 if device == "No internet service" else 0
-    inputs["DeviceProtection_Yes"] = 1 if device == "Yes" else 0
-
-    tech = st.sidebar.selectbox("Tech Support", opt_vals)
-    inputs["TechSupport_No internet service"] = 1 if tech == "No internet service" else 0
-    inputs["TechSupport_Yes"] = 1 if tech == "Yes" else 0
-
-    stream_tv = st.sidebar.selectbox("Streaming TV", opt_vals)
-    inputs["StreamingTV_No internet service"] = 1 if stream_tv == "No internet service" else 0
-    inputs["StreamingTV_Yes"] = 1 if stream_tv == "Yes" else 0
-
-    stream_mov = st.sidebar.selectbox("Streaming Movies", opt_vals)
-    inputs["StreamingMovies_No internet service"] = 1 if stream_mov == "No internet service" else 0
-    inputs["StreamingMovies_Yes"] = 1 if stream_mov == "Yes" else 0
-
-    # ---- Account Info ----
-    st.sidebar.subheader("Account Info")
-    inputs["tenure"] = st.sidebar.number_input(
-        "Tenure (months)", min_value=0, max_value=72, value=12, step=1
-    )
-    inputs["MonthlyCharges"] = st.sidebar.number_input(
-        "Monthly Charges ($)", min_value=0.0, max_value=120.0, value=50.0, step=1.0
-    )
-    inputs["TotalCharges"] = st.sidebar.number_input(
-        "Total Charges ($)", min_value=0.0, max_value=10000.0, value=500.0, step=10.0
+    st.html(ui.group("Services"))
+    a, b = st.columns(2)
+    phone = a.toggle("Phone service", value=True)
+    lines = b.toggle("More than one phone line", value=False, disabled=not phone)
+    internet = pick("Internet", INTERNET, "Fiber optic", "internet")
+    add_ons = st.pills(
+        "Extras on top of internet",
+        list(ADD_ONS),
+        format_func=lambda key: ADD_ONS[key],
+        selection_mode="multi",
+        disabled=internet == "No",
+        help="Only available with an internet connection.",
     )
 
-    contract = st.sidebar.selectbox(
-        "Contract", ["Month-to-month", "One year", "Two year"]
-    )
-    inputs["Contract_One year"] = 1 if contract == "One year" else 0
-    inputs["Contract_Two year"] = 1 if contract == "Two year" else 0
+    st.html(ui.group("About the customer"))
+    gender = pick("Gender", ("Female", "Male"), "Female", "gender")
+    a, b, c = st.columns(3)
+    senior = a.toggle("Senior citizen")
+    partner = b.toggle("Has a partner")
+    dependents = c.toggle("Has dependents")
 
-    paperless = st.sidebar.selectbox("Paperless Billing", ["No", "Yes"])
-    inputs["PaperlessBilling_Yes"] = 1 if paperless == "Yes" else 0
-
-    payment = st.sidebar.selectbox(
-        "Payment Method",
-        [
-            "Bank transfer (automatic)",
-            "Credit card (automatic)",
-            "Electronic check",
-            "Mailed check",
-        ],
-    )
-    cc_auto = "Credit card (automatic)"
-    inputs[f"PaymentMethod_{cc_auto}"] = 1 if payment == cc_auto else 0
-    inputs["PaymentMethod_Electronic check"] = 1 if payment == "Electronic check" else 0
-    inputs["PaymentMethod_Mailed check"] = 1 if payment == "Mailed check" else 0
-
-    return inputs
-
-
-def inject_custom_css() -> None:
-    """Inject custom CSS for nicer dashboard styling."""
-    st.markdown(
-        """
-        <style>
-        .stApp { background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%); }
-        h1 {
-            color: #1e293b !important; font-weight: 700 !important;
-            padding-bottom: 0.25rem; border-bottom: 3px solid #3b82f6;
-            margin-bottom: 0.5rem !important;
-        }
-        h2, h3 { color: #334155 !important; font-weight: 600 !important; }
-        [data-testid="stMetric"] {
-            background: white; padding: 1rem 1.25rem; border-radius: 10px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e2e8f0;
-        }
-        [data-testid="stMetricLabel"] { color: #64748b !important; font-weight: 500 !important; }
-        [data-testid="stMetricValue"] { color: #1e293b !important; font-weight: 700 !important; }
-        [data-testid="stSidebar"] { background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%); }
-        [data-testid="stSidebar"] .stMarkdown { color: #f1f5f9; }
-        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-            color: #f8fafc !important;
-        }
-        [data-testid="stSidebar"] label { color: #cbd5e1 !important; }
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px; background: #e2e8f0; padding: 6px; border-radius: 10px;
-        }
-        .stTabs [data-baseweb="tab"] { border-radius: 8px; padding: 10px 20px; font-weight: 500; }
-        .stTabs [aria-selected="true"] { background: #3b82f6 !important; color: white !important; }
-        hr { margin: 1.5rem 0 !important; border-color: #e2e8f0 !important; }
-        .stMarkdown p { color: #475569; line-height: 1.6; }
-        </style>
-        """,
-        unsafe_allow_html=True,
+    return Profile(
+        contract=contract,
+        tenure=int(tenure),
+        monthly_charges=float(monthly),
+        total_charges=float(total),
+        payment=str(payment),
+        paperless=paperless,
+        phone=phone,
+        multiple_lines=phone and lines,
+        internet=internet,
+        add_ons=frozenset(add_ons or []) if internet != "No" else frozenset(),
+        male=gender == "Male",
+        senior=senior,
+        partner=partner,
+        dependents=dependents,
     )
 
 
 def main() -> None:
     st.set_page_config(
-        page_title="Customer Churn Prediction Dashboard",
-        page_icon="📊",
+        page_title="Customer churn",
+        page_icon=str(config.PROJECT_ROOT / "static" / "favicon.png"),
         layout="wide",
     )
-    inject_custom_css()
+    st.html(ui.CSS)
 
     model, feature_names = load_model_and_artifacts()
     if model is None or feature_names is None:
@@ -226,165 +196,187 @@ def main() -> None:
         )
         return
 
-    # ---- HEADER ----
-    st.title("Customer Churn Prediction Dashboard")
-    st.markdown(
-        "This dashboard predicts customer churn for a telecom dataset. "
-        "Use the sidebar to set customer features and click **Predict** to see the "
-        "churn probability, risk level, and top influencing factors. "
-        "You can also explore model performance and data insights in the tabs below."
-    )
-
-    X_train, X_test, y_train, y_test, df_raw = load_processed_data()
-    y_pred = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)[:, 1]
+    _, _, _, y_test, df_raw = load_processed_data()
+    y_pred, y_proba = score_test_set()
     accuracy = accuracy_score(y_test, y_pred)
-    total_customers = len(df_raw)
-    churn_rate = (
-        (df_raw[config.TARGET_COLUMN] == "Yes").mean()
-        if config.TARGET_COLUMN in df_raw.columns
-        else 0
-    )
+    tested = len(y_test)
+    left = df_raw[config.TARGET_COLUMN] == "Yes"
+    st.html(ui.masthead(len(df_raw), float(left.mean()), float(accuracy), tested))
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Customers", f"{total_customers:,}")
-    col2.metric("Churn Rate", f"{churn_rate:.1%}")
-    col3.metric("Model Accuracy", f"{accuracy:.1%}")
+    one, quality, data = st.tabs(["One customer", "How good is the model?", "What the data says"])
 
-    st.divider()
-
-    # ---- SIDEBAR: input features + predict ----
-    st.sidebar.header("Input Features")
-    inputs = get_sidebar_inputs(feature_names)
-    predict_clicked = st.sidebar.button("Predict", type="primary")
-
-    # ---- MAIN: tabs ----
-    tab1, tab2, tab3 = st.tabs(
-        ["Prediction Results", "Model Performance", "Data Insights"]
-    )
-
-    with tab1:
-        st.subheader("Prediction Results")
-        if predict_clicked:
-            row_df = build_input_row(feature_names, inputs)
-            proba = float(model.predict_proba(row_df)[0, 1])
-            proba_pct = round(proba * 100, 1)
-
-            fig_gauge = go.Figure(
-                go.Indicator(
-                    mode="gauge+number",
-                    value=proba_pct,
-                    number={"suffix": "%", "font": {"size": 40}},
-                    title={"text": "Churn Probability"},
-                    gauge={
-                        "axis": {"range": [0, 100]},
-                        "bar": {"color": "darkblue"},
-                        "steps": [
-                            {"range": [0, 33], "color": "lightgreen"},
-                            {"range": [33, 66], "color": "yellow"},
-                            {"range": [66, 100], "color": "lightcoral"},
-                        ],
-                        "threshold": {
-                            "line": {"color": "red", "width": 4},
-                            "value": 50,
-                        },
-                    },
+    # ---- one customer: the account sheet on the left, the verdict on the right
+    with one, st.container(key="customer"):
+        form, result = st.columns([1.05, 1], gap="large")
+        with form:
+            profile = customer_form()
+        proba = score(model, feature_names, profile)
+        risk, _ = risk_level(proba)
+        bins = np.histogram(y_proba, bins=25, range=(0.0, 1.0))[0]
+        leans_on = [
+            pretty_feature(name)
+            for name, _ in top_factors(model.feature_importances_, feature_names)
+        ]
+        with result, st.container(key="verdict"):
+            st.html(
+                ui.verdict(
+                    proba, risk, [int(b) for b in bins], float((y_proba < proba).mean()), tested
                 )
             )
-            fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
-            st.plotly_chart(fig_gauge, use_container_width=True)
-
-            risk, risk_color = risk_level(proba)
-            st.markdown(f"**Risk level:** :{risk_color}[**{risk}**]")
-
-            st.markdown("**Top 3 factors influencing this prediction:**")
-            for i, (name, importance) in enumerate(
-                top_factors(model.feature_importances_, feature_names), 1
-            ):
-                st.write(f"{i}. {name} (importance: {importance:.3f})")
-        else:
-            st.info(
-                "Click **Predict** in the sidebar to see the churn probability "
-                "and risk level."
+            st.html(
+                ui.what_ifs(proba, lowering_changes(model, feature_names, profile, proba), leans_on)
             )
 
-    with tab2:
-        st.subheader("Model Performance")
-
-        cm = confusion_matrix(y_test, y_pred)
-        fig_cm, ax = plt.subplots(figsize=(5, 4))
-        ConfusionMatrixDisplay(confusion_matrix=cm).plot(ax=ax, cmap="Blues")
-        ax.set_title("Confusion Matrix (Test Set)")
-        st.pyplot(fig_cm)
-        plt.close()
+    # ---- the model: what it got right and wrong on customers it never saw
+    with quality:
+        (stayed_right, stayed_flagged), (left_missed, left_caught) = confusion_matrix(
+            y_test, y_pred
+        )
+        flagged = stayed_flagged + left_caught
+        leavers = left_missed + left_caught
+        always_stays = max(leavers, tested - leavers) / tested
+        st.subheader(f"Tested on {tested:,} customers it had never seen")
+        grid, reading = st.columns([1.5, 1], gap="large")
+        grid.html(ui.outcomes(stayed_right, stayed_flagged, left_missed, left_caught))
+        reading.html(
+            ui.readings(
+                [
+                    (
+                        f"{left_caught / leavers:.0%} of leavers caught",
+                        f"{left_caught:,} of the {leavers:,} customers who left were flagged.",
+                    ),
+                    (
+                        f"{left_caught / flagged:.0%} of flags were right",
+                        f"{left_caught:,} of the {flagged:,} customers it flagged really left.",
+                    ),
+                    (
+                        f"{accuracy:.1%} right overall",
+                        f"Saying “stays” for everyone would be right {always_stays:.1%} "
+                        "of the time, and would catch nobody.",
+                    ),
+                ]
+            )
+        )
 
         fpr, tpr, _ = roc_curve(y_test, y_proba)
         roc_auc = auc(fpr, tpr)
+        st.subheader("How well it ranks customers")
+        st.caption(
+            f"ROC curve: as the bar for flagging is lowered, more leavers are caught (up) and "
+            f"more loyal customers are flagged by mistake (right). Area under the curve: "
+            f"{roc_auc:.2f}; a coin flip scores 0.50."
+        )
         fig_roc = go.Figure()
         fig_roc.add_trace(
             go.Scatter(
-                x=fpr, y=tpr, mode="lines",
-                name=f"ROC (AUC = {roc_auc:.3f})",
-                line=dict(color="blue", width=2),
+                x=[0, 1],
+                y=[0, 1],
+                mode="lines",
+                name="A coin flip",
+                line={"color": "#9AA0AC", "dash": "dash", "width": 1.5},
+                hoverinfo="skip",
             )
         )
         fig_roc.add_trace(
             go.Scatter(
-                x=[0, 1], y=[0, 1], mode="lines", name="Random",
-                line=dict(color="gray", dash="dash"),
+                x=fpr,
+                y=tpr,
+                mode="lines",
+                name="The model",
+                line={"color": ui.STAYS, "width": 2.5},
+                hovertemplate="Loyal customers flagged: %{x:.0%}<br>Leavers caught: %{y:.0%}"
+                "<extra></extra>",
             )
         )
-        fig_roc.update_layout(
-            title="ROC Curve",
-            xaxis_title="False Positive Rate",
-            yaxis_title="True Positive Rate",
-            height=400,
-            showlegend=True,
+        fig_roc.add_trace(
+            go.Scatter(
+                x=[stayed_flagged / (tested - leavers)],
+                y=[left_caught / leavers],
+                mode="markers+text",
+                name="Where it flags today",
+                marker={"color": ui.INK, "size": 11, "line": {"color": ui.PAGE, "width": 2}},
+                text=["flags at 50% or more"],
+                textposition="bottom right",
+                textfont={"color": ui.INK, "size": 13},
+                hoverinfo="skip",
+            )
         )
-        st.plotly_chart(fig_roc, use_container_width=True)
-
-        imp_df = pd.DataFrame(
-            {"Feature": feature_names, "Importance": model.feature_importances_}
-        ).sort_values("Importance", ascending=True)
-        fig_imp = px.bar(
-            imp_df.tail(15), x="Importance", y="Feature", orientation="h",
-            title="Feature Importance (Top 15)",
+        fig_roc.update_xaxes(
+            title_text="Loyal customers flagged by mistake", tickformat=".0%", range=[0, 1]
         )
-        fig_imp.update_layout(height=500, yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig_imp, use_container_width=True)
+        fig_roc.update_yaxes(title_text="Leavers caught", tickformat=".0%", range=[0, 1.02])
+        st.plotly_chart(ui.style(fig_roc, 400, legend=True), theme=None, config=HIDE_TOOLBAR)
 
-    with tab3:
-        st.subheader("Data Insights")
-        if config.TARGET_COLUMN in df_raw.columns:
-            churn_counts = df_raw[config.TARGET_COLUMN].value_counts().reset_index()
-            churn_counts.columns = ["Churn", "Count"]
-            fig_churn = px.bar(
-                churn_counts, x="Churn", y="Count",
-                title="Distribution of Churn", color="Churn",
+        st.subheader("What the model weighs most")
+        st.caption("The 15 inputs the random forest relies on most, across all customers.")
+        importance = (
+            pd.DataFrame({"feature": feature_names, "importance": model.feature_importances_})
+            .sort_values("importance")
+            .tail(15)
+        )
+        fig_imp = go.Figure(
+            go.Bar(
+                x=importance.importance,
+                y=[pretty_feature(f) for f in importance.feature],
+                orientation="h",
+                marker={"color": ui.STAYS},
+                width=0.62,
+                hovertemplate="%{y}: %{x:.3f}<extra></extra>",
             )
-            st.plotly_chart(fig_churn, use_container_width=True)
+        )
+        fig_imp.update_xaxes(title_text="Importance, as a share of the total", tickformat=".0%")
+        ui.style(fig_imp, 520)
+        fig_imp.update_yaxes(showgrid=False, tickfont={"size": 13, "color": ui.INK2})
+        st.plotly_chart(fig_imp, theme=None, config=HIDE_TOOLBAR)
 
-        if "tenure" in df_raw.columns and config.TARGET_COLUMN in df_raw.columns:
-            fig_tenure = px.box(
-                df_raw, x="Churn", y="tenure",
-                title="Tenure by Churn Status", color="Churn",
-            )
-            st.plotly_chart(fig_tenure, use_container_width=True)
+    # ---- the data: who left
+    with data:
+        status = left.map({True: "Left", False: "Stayed"})
+        colours = {"Stayed": ui.STAYS, "Left": ui.LEAVES}
+        st.subheader(f"{int(left.sum()):,} of {len(df_raw):,} customers left")
+        st.html(ui.split(int((~left).sum()), int(left.sum())))
 
-        if "MonthlyCharges" in df_raw.columns and config.TARGET_COLUMN in df_raw.columns:
-            fig_mc = px.box(
-                df_raw, x="Churn", y="MonthlyCharges",
-                title="Monthly Charges by Churn Status", color="Churn",
+        st.subheader("Short contracts lose the most customers")
+        st.caption("Share of customers on each contract who left.")
+        by_contract = left.groupby(df_raw["Contract"]).agg(["sum", "size"]).reindex(CONTRACTS)
+        st.html(
+            ui.rates(
+                [
+                    (f"{name} contract", int(row["sum"]), int(row["size"]))
+                    for name, row in by_contract.iterrows()
+                ]
             )
-            st.plotly_chart(fig_mc, use_container_width=True)
+        )
 
-        if "Contract" in df_raw.columns and config.TARGET_COLUMN in df_raw.columns:
-            ct = df_raw.groupby(["Contract", "Churn"]).size().reset_index(name="Count")
-            fig_contract = px.bar(
-                ct, x="Contract", y="Count", color="Churn", barmode="group",
-                title="Churn by Contract Type",
-            )
-            st.plotly_chart(fig_contract, use_container_width=True)
+        st.subheader("Leavers are newer customers, and pay more")
+        tenure_col, charges_col = st.columns(2, gap="large")
+        for column, field, title, unit in (
+            (tenure_col, "tenure", "Months with the company", ""),
+            (charges_col, "MonthlyCharges", "Monthly charges", "$"),
+        ):
+            fig = go.Figure()
+            for name in ("Stayed", "Left"):
+                fig.add_trace(
+                    go.Box(
+                        y=df_raw.loc[status == name, field],
+                        name=name,
+                        boxpoints=False,
+                        marker={"color": colours[name]},
+                        line={"width": 2},
+                        fillcolor="rgba(0,0,0,0)",
+                        width=0.45,
+                    )
+                )
+            fig.update_yaxes(title_text=title, tickprefix=unit, rangemode="tozero")
+            ui.style(fig, 360)
+            fig.update_xaxes(showgrid=False, tickfont={"size": 13, "color": ui.INK2})
+            column.plotly_chart(fig, theme=None, config=HIDE_TOOLBAR)
+        st.caption(
+            "Each box holds the middle half of customers; the line inside is the median, and "
+            "the whiskers reach the lowest and highest values."
+        )
+
+    st.html(ui.footer(REPO))
 
 
 if __name__ == "__main__":
